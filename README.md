@@ -1,142 +1,51 @@
-# ORB-SLAM3 (Hardened & Extended Fork)
+# ORB-SLAM3 (Hardened & Extended Fork) - origin for this fork
 
 A production-grade, hardened fork of **ORB-SLAM3 V1.0** featuring multi-session map persistence, pure relocalization, robust cross-map place recognition, memory and concurrency hardening, Three.js web visualization, and hermetic Nix flake integration.
 
 ---
 
-## Current Status
+## Goals
 
-- **Branch**: `master` (synchronized with PR #7 core stability patches and PR #8 map relocalization & extension).
-- **Test Suite**: 100% pass rate on `orb_slam3_tests` (21/21 GoogleTest cases passing via CTest).
-- **Build Toolchain**: Fully reproducible via Nix Flake (`flake.nix`), supporting modern GCC, CMake 4.x policy shims, OpenCV 4 with GTK3, and Pangolin 0.9.1.
-- **Tested Hardware & Sensors**: Stereo (RealSense D435i), Monocular, Monocular-Inertial, Stereo-Inertial, and RGB-D.
+- Achieve continuous orientation tracking without sudden jumps or drift.
 
+## Changes in this fork
+
+- Configured cross-compilation for headless execution on Raspberry Pi 5 without ROS.
+- Developed a driver for the Waveshare IMX219-83 Stereo Camera (2 × IMX219 + ICM20948), with automatic exposure and gain control optimized for SLAM.
+- Relaxed initialization requirements in Stereo-Inertial mode, eliminating the need for accelerated motion at the initial stage.
+- Added gyro-history-based orientation recovery after map resets and a diagnostic-only IMU orientation consistency check for recent map merges; the check does not affect merge decisions.
+- Enabled place recognition for Stereo-Inertial maps after initial IMU initialization, without waiting for BA2.
+- Enabled RViz2 visualization on a remote machine using a Python proxy script.
 ---
 
 ## Raspberry Pi stereo-inertial input
 
-`Examples/Stereo-Inertial/stereo_inertial_icm20948.cc` captures a stereo pair
-with libcamera and ICM-20948 measurements over I2C. Configure the cameras and
-IMU for your rig in `Examples/Stereo-Inertial/ICM20948_Kalibr.yaml`. Run
-`calibrate_icm20948.py gyro` and `calibrate_icm20948.py accel` on the Pi with
-the IMU available and SLAM stopped. The tracked camera and IMU calibrations are
-specific to the current rig and must be replaced for other hardware.
+`Examples/Stereo-Inertial/stereo_inertial_icm20948.cc` captures a stereo pair with libcamera and ICM-20948 measurements over I2C. Configure the cameras and IMU for your rig in `Examples/Stereo-Inertial/ICM20948_Kalibr.yaml`. Run `calibrate_icm20948.py gyro` and `calibrate_icm20948.py accel` on the Pi with the IMU available and SLAM stopped. The tracked camera and IMU calibrations are specific to the current rig and must be replaced for other hardware.
 
 When libcamera is available, CMake also provides the `recorder_icm20948`
-target and `Examples/Calibration/run_icm20948_calibration.sh` launcher. The
-recorder uses the same IMU ranges and calibration as the live driver.
+target and `Examples/Calibration/run_icm20948_calibration.sh` launcher. The recorder uses the same IMU ranges and calibration as the live driver.
 
-On WSL, `./build_rpi5_target.sh` cross-builds the fork and its own DBoW2 and
-g2o libraries using the sysroot in `.cross/rpi5/root`. The sysroot must match
-the target Pi and is not tracked in Git. Set `ORB_SLAM_BUILD_JOBS` to change
-the default of two parallel jobs. The build does not deploy by default;
-`ORB_SLAM_DEPLOY=1 ./build_rpi5_target.sh` copies the binaries and libraries
-to the separate `/home/pi/projects/ORB_SLAM3_Hardened_RPi` directory.
+On remote, `./build_rpi5_target.sh` cross-builds the fork and its own DBoW2 and g2o libraries using the sysroot in `.cross/rpi5/root`. The sysroot must match the target Pi and is not tracked in Git. Set `ORB_SLAM_BUILD_JOBS` to change the default of two parallel jobs. The build does not deploy by default;
+`ORB_SLAM_DEPLOY=1 ./build_rpi5_target.sh` copies the binaries and libraries to the separate `/home/pi/projects/ORB_SLAM3_Hardened_RPi` directory.
 `ORB_SLAM_PI_HOST` and `ORB_SLAM_PI_ROOT` override that destination.
-Provide the vocabulary, configuration, launcher and optional IMU calibration
-at the destination before starting the application.
+Provide the vocabulary, configuration, launcher and optional IMU calibration at the destination before starting the application.
 
 The TCP/RViz bridge and configuration are in `Examples/Stereo-Inertial`.
 The bridge publishes tracking state and pose using this fork's frame snapshot.
 The image feeds show tracked map points on the stereo frames.
-On the WSL machine run `Examples/Stereo-Inertial/run_rviz2_icm20948.sh`;
-on the Pi run `Examples/Stereo-Inertial/run_icm20948_slam.sh --viz-host WSL_IP`.
+On the remote machine run `Examples/Stereo-Inertial/run_rviz2_icm20948.sh`;
+on the Pi run `Examples/Stereo-Inertial/run_icm20948_slam.sh --viz-host REMOTE_IP`.
+
+### Automatic exposure control
+
 In `ICM20948_Kalibr.yaml`, set `Camera.captureFps` (camera capture),
-`Camera.fps` (SLAM processing) and `Camera.exposureTimeUs` (maximum automatic
-shutter in microseconds; previously a fixed shutter). The supplied starting
-values are 30 FPS, 15 FPS and 15000 us.
-The rates must be positive integers, with processing no higher than capture;
-the shutter must be positive and shorter than the capture frame period. The
-driver checks each camera's supported shutter range, but the sensor may still
-clamp the actual shutter due to timing constraints. The application creates a
-temporary Raspberry Pi 5 IMX219 tuning file from
+`Camera.fps` (SLAM processing) and `Camera.exposureTimeUs` (maximum automatic shutter in microseconds; previously a fixed shutter). The supplied starting values are 30 FPS, 15 FPS and 15000 us.
+The application creates a temporary Raspberry Pi 5 IMX219 tuning file from
 `/usr/share/libcamera/ipa/rpi/pisp/imx219.json` (or the file specified by
-`LIBCAMERA_RPI_TUNING_FILE`) before starting libcamera. Its normal AGC profile
-prefers short exposures and increases analogue gain up to approximately 10x
-before extending shutter up to the configured maximum. Both cameras use this
-profile independently; their actual exposure and gain can differ. The log
-periodically reports actual exposure, analogue gain and digital gain for each
-camera. Building the libcamera stereo example requires Boost.JSON headers
+`LIBCAMERA_RPI_TUNING_FILE`) before starting libcamera. Its normal AGC profile prefers short exposures and increases analogue gain up to approximately 10x before extending shutter up to the configured maximum. Both cameras use this profile independently; their actual exposure and gain can differ. The log periodically reports actual exposure, analogue gain and digital gain for each camera. 
+Building the libcamera stereo example requires Boost.JSON headers
 (Boost 1.75 or newer). The calibration recorder retains its separate
 fixed-shutter setting.
-Longer exposures reduce noise in dark scenes
-but increase motion blur. Non-integer capture/processing ratios select frames
-at alternating intervals; processing load can reduce the actual input rate.
-If the Pi cannot reach the WSL address, an SSH reverse tunnel can be used
-instead: from WSL run `ssh -N -R 127.0.0.1:8765:127.0.0.1:8765 pi@rpi5.local`
-and pass `--viz-host 127.0.0.1` on the Pi.
-
-Stereo-inertial visual initialization does not require the initial acceleration
-change. It waits for at least 50 usable stereo points (finite positive depths,
-and for two-camera models valid matches and finite triangulated points), in
-addition to the existing feature-count requirement. The threshold reflects
-the tracker's 50-inlier requirement after relocalization; passing it cannot
-guarantee that a subsequent frame will track successfully.
-
-For stereo-inertial maps, place recognition starts after initial IMU
-initialization rather than waiting for BA2; other inertial sensors still wait
-for BA2. Recognition still requires at least 12 keyframes and the existing
-geometric and scale checks. As in the previous project, an inertial merge
-before BA2 runs bias optimization and marks BA1 and BA2 complete. Merging
-also transforms the active map into the matched map's coordinate frame; the
-`Merge alignment` log reports the applied rotation and scale, and an
-`Early inertial merge` message reports the early BA state change.
-For stereo-inertial merges, `Merge IMU shadow` compares the raw visual
-alignment with a gyro-only prediction anchored at the last trusted pose of
-the matched map. This is diagnostic only and never gates a merge. The model
-starts with zero orientation and bias covariance because their actual initial
-uncertainties are not known; `model_sigma_max_rad` therefore represents only
-the modeled growth from configured gyro noise and bias random walk, not a
-calibrated confidence bound. Gaps, missing snapshots, a different matched map,
-or an unavailable anchor reference make the comparison unavailable. The
-provisional shadow policy reports `accept` if the angular disagreement is at
-most 10 degrees plus three times the modeled maximum rotation sigma; otherwise
-it reports `defer`. It reports `disabled` if the anchor is older than 30 seconds,
-the modeled sigma is at least 10 degrees, or required data are unavailable.
-These deliberately provisional values are not a calibrated confidence interval
-or a merge gate; the existing merge decision is unchanged in every case.
-`IMU frame diagnostic` logs body roll, pitch and yaw (degrees, ZYX convention)
-when the rotation discrepancy first reaches 3 degrees, alongside the gyro
-prediction from the last trusted pose; another event is logged after the
-discrepancy drops below the threshold and rises again. During a loss it also reports the separate merge accumulator's
-relative rotation and anchor. The gyro prediction is reanchored on each trusted
-frame, so it detects frame-to-frame discontinuities rather than measuring
-long-term drift. Check map and anchor IDs before comparing world-frame angles;
-the frames can differ during a map transition. Euler yaw is ambiguous near
-pitch ±90 degrees; use the quaternion/rotation difference there.
-This does not make accelerometer bias and velocity observable while stationary:
-the later inertial optimization still needs suitable motion, and the BA1/BA2
-motion-based timing remains unchanged.
-
-The ICM-20948 example records a separate five-second gyro history, sized from
-the configured IMU frequency, independently of the SLAM delivery queue. Once
-an inertial map has a successfully tracked pose, that pose and its estimated
-gyro bias anchor the history. Older samples are folded into a cumulative
-rotation, so a reset lasting longer than five seconds can still recover the
-orientation if the measurements are continuous. The new stereo map starts
-with its camera position at the origin and uses the recovered orientation
-instead of performing another gravity alignment. Subsequent visual-inertial
-optimization can still adjust poses; gyro bias error causes drift while visual
-tracking is unavailable. Before any trustworthy inertial pose exists, normal
-gravity initialization is used. The history, anchor and inherited-orientation
-flag are runtime-only; saving and reloading an atlas does not preserve them.
-
-The history reports an error rather than inventing rotation when timestamps
-are invalid, a sample gap exceeds ten nominal IMU periods, the frame is not
-covered, or the measured sample rate exceeds its allocated capacity. The
-separate SLAM delivery queue can also overflow while tracking is blocked; its
-first overflow is reported and counted as `capacity_drops`. Rotation recovery
-does not reconstruct the accelerometer samples dropped from that queue.
-
-The example logs `[slam-orientation]` approximately every two seconds with
-tracking state, map ID and camera-to-world quaternion `camera_Rwc_q_wxyz`.
-Only compare poses with a valid pose and a trustworthy tracking state. On
-recovery the `IMU orientation recovered` line reports the anchor time and
-age, folded interval and segment count, whether any folded delta was used,
-and quaternions in `w,x,y,z` order: anchor body-to-world, folded body-relative
-delta, total body-relative delta, and recovered body-to-world orientation
-`Rwb`. The folded delta can be identity even when segments were integrated.
-Comparing `Rwb` with `Rwc` requires the calibrated camera-to-IMU rotation.
 
 ---
 
