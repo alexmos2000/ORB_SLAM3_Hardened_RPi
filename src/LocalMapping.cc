@@ -133,7 +133,8 @@ void LocalMapping::Run()
 
                         if(dist>0.05)
                             mTinit += mpCurrentKeyFrame->mTimeStamp - mpCurrentKeyFrame->mPrevKF->mTimeStamp;
-                        if(!mpCurrentKeyFrame->GetMap()->GetIniertialBA2())
+                        if(mpTracker->mSensor != System::IMU_STEREO &&
+                           !mpCurrentKeyFrame->GetMap()->GetIniertialBA2())
                         {
                             if((mTinit<10.f) && (dist<0.02))
                             {
@@ -1230,6 +1231,7 @@ void LocalMapping::InitializeIMU(float priorG, float priorA, bool bFIBA)
 
     const int N = vpKF.size();
     IMU::Bias b(0,0,0,0,0,0);
+    const bool inheritedOrientation = mpCurrentKeyFrame->GetMap()->HasInheritedImuOrientation();
 
     // Compute and KF velocities mRwg estimation
     if (!mpCurrentKeyFrame->GetMap()->isImuInitialized())
@@ -1244,20 +1246,31 @@ void LocalMapping::InitializeIMU(float priorG, float priorA, bool bFIBA)
             if (!(*itKF)->mPrevKF)
                 continue;
 
-            dirG -= (*itKF)->mPrevKF->GetImuRotation() * (*itKF)->mpImuPreintegrated->GetUpdatedDeltaVelocity();
+            if (!inheritedOrientation)
+                dirG -= (*itKF)->mPrevKF->GetImuRotation() * (*itKF)->mpImuPreintegrated->GetUpdatedDeltaVelocity();
             Eigen::Vector3f _vel = ((*itKF)->GetImuPosition() - (*itKF)->mPrevKF->GetImuPosition())/(*itKF)->mpImuPreintegrated->dT;
             (*itKF)->SetVelocity(_vel);
             (*itKF)->mPrevKF->SetVelocity(_vel);
         }
 
-        dirG = dirG/dirG.norm();
-        Eigen::Vector3f gI(0.0f, 0.0f, -1.0f);
-        Eigen::Vector3f v = gI.cross(dirG);
-        const float nv = v.norm();
-        const float cosg = gI.dot(dirG);
-        const float ang = acos(cosg);
-        Eigen::Vector3f vzg = v*ang/nv;
-        Rwg = Sophus::SO3f::exp(vzg).matrix();
+        if (inheritedOrientation)
+        {
+            Rwg = Eigen::Matrix3f::Identity();
+            mbg = mpCurrentKeyFrame->GetGyroBias().cast<double>();
+            mba = mpCurrentKeyFrame->GetAccBias().cast<double>();
+        }
+        else
+        {
+            if (!dirG.allFinite() || dirG.norm() < 1e-6f)
+            {
+                cout << "IMU initialization delayed: insufficient gravity measurement" << endl;
+                bInitializing = false;
+                return;
+            }
+            dirG.normalize();
+            Eigen::Vector3f gI(0.0f, 0.0f, -1.0f);
+            Rwg = Eigen::Quaternionf::FromTwoVectors(gI, dirG).toRotationMatrix();
+        }
         mRwg = Rwg.cast<double>();
         mTinit = mpCurrentKeyFrame->mTimeStamp-mFirstTs;
     }
@@ -1273,7 +1286,7 @@ void LocalMapping::InitializeIMU(float priorG, float priorA, bool bFIBA)
     mInitTime = mpTracker->mLastFrame.mTimeStamp-vpKF.front()->mTimeStamp;
 
     std::chrono::steady_clock::time_point t0 = std::chrono::steady_clock::now();
-    Optimizer::InertialOptimization(mpAtlas->GetCurrentMap(), mRwg, mScale, mbg, mba, mbMonocular, infoInertial, false, false, priorG, priorA);
+    Optimizer::InertialOptimization(mpAtlas->GetCurrentMap(), mRwg, mScale, mbg, mba, mbMonocular, infoInertial, false, false, priorG, priorA, inheritedOrientation);
 
     std::chrono::steady_clock::time_point t1 = std::chrono::steady_clock::now();
 
@@ -1287,7 +1300,7 @@ void LocalMapping::InitializeIMU(float priorG, float priorA, bool bFIBA)
     // Before this line we are not changing the map
     {
         unique_lock<mutex> lock(mpAtlas->GetCurrentMap()->mMutexMapUpdate);
-        if ((fabs(mScale - 1.f) > 0.00001) || !mbMonocular) {
+        if (!inheritedOrientation && ((fabs(mScale - 1.f) > 0.00001) || !mbMonocular)) {
             Sophus::SE3f Twg(mRwg.cast<float>().transpose(), Eigen::Vector3f::Zero());
             mpAtlas->GetCurrentMap()->ApplyScaledRotation(Twg, mScale, true);
             mpTracker->UpdateFrameIMU(mScale, vpKF[0]->GetImuBias(), mpCurrentKeyFrame);

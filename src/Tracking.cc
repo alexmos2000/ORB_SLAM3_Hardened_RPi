@@ -18,6 +18,8 @@
 
 
 #include "Tracking.h"
+#include "OrientationEuler.h"
+#include "MergeImuShadowPolicy.h"
 
 #include "ORBmatcher.h"
 #include "FrameDrawer.h"
@@ -30,6 +32,7 @@
 #include "KannalaBrandt8.h"
 #include "MLPnPsolver.h"
 #include "GeometricTools.h"
+#include "StereoInitializationPoints.h"
 
 #include <iostream>
 
@@ -1617,6 +1620,109 @@ Sophus::SE3f Tracking::GrabImageMonocular(const cv::Mat &im, const double &times
 }
 
 
+void Tracking::EnableImuRotationHistory(double frequency)
+{
+    if (mpImuRotationHistory)
+        throw std::runtime_error("IMU rotation history is already enabled");
+    mpImuRotationHistory = std::make_unique<ImuRotationHistory>(frequency);
+    const double noise = std::sqrt(mpImuCalib->Cov.diagonal()(0) / frequency);
+    const double walk = std::sqrt(mpImuCalib->CovWalk.diagonal()(0) * frequency);
+    mpMergeImuHistory = std::make_unique<MergeImuHistory>(frequency, noise, walk);
+}
+
+void Tracking::RecordImuRotationSample(const IMU::Point &measurement)
+{
+    if (!mpImuRotationHistory)
+        throw std::runtime_error("IMU rotation history is not enabled");
+    mpImuRotationHistory->Push(measurement.t, measurement.w.cast<double>());
+    mpMergeImuHistory->Push(measurement.t, measurement.w.cast<double>());
+}
+
+void Tracking::LogMergeImuComparison(KeyFrame *current, KeyFrame *matched,
+                                     const Eigen::Quaterniond &oldFromNew)
+{
+    if (!mpMergeImuHistory)
+        return;
+    Map *matchedMap = matched->GetMap();
+    const unsigned long matchedId = matchedMap->GetId();
+    MergeImuHistory::Snapshot snapshot{};
+    std::string reason;
+    if (!mpMergeImuHistory->Get(current->mnId, matchedId, snapshot, reason))
+    {
+        cout << "Merge IMU shadow: decision=disabled current_kf=" << current->mnId
+             << " matched_map=" << matchedId << " reason=" << reason << endl;
+        return;
+    }
+    Eigen::Quaterniond reference;
+    bool found = false;
+    if (!matchedMap->IsBad())
+        for (KeyFrame *kf : matchedMap->GetAllKeyFrames())
+            if (kf && kf->mnId == snapshot.anchor.referenceId && !kf->isBad() &&
+                kf->GetMap() == matchedMap)
+            {
+                reference = Eigen::Quaterniond(kf->GetImuRotation().cast<double>()).normalized();
+                found = true;
+                break;
+            }
+    if (!found)
+    {
+        cout << "Merge IMU shadow: decision=disabled current_kf=" << current->mnId
+             << " matched_map=" << matchedId << " reason=anchor_reference_unavailable" << endl;
+        return;
+    }
+    const Eigen::Quaterniond predicted = (reference * snapshot.anchor.referenceToBody *
+                                          snapshot.estimate.delta).normalized();
+    const Eigen::Quaterniond visual = (oldFromNew *
+        Eigen::Quaterniond(current->GetImuRotation().cast<double>())).normalized();
+    const Eigen::Quaterniond difference = (predicted.conjugate() * visual).normalized();
+    const Eigen::Vector3d predictedEuler = OrientationEulerDegrees(predicted.toRotationMatrix());
+    const Eigen::Vector3d visualEuler = OrientationEulerDegrees(visual.toRotationMatrix());
+    const Eigen::AngleAxisd error(difference);
+    const auto covariance = snapshot.estimate.covariance.block<3, 3>(0, 0).eval();
+    const auto biasCovariance = snapshot.estimate.covariance.block<3, 3>(3, 3).eval();
+    Eigen::SelfAdjointEigenSolver<Eigen::Matrix3d> solver(covariance);
+    if (solver.info() != Eigen::Success || !solver.eigenvalues().allFinite() ||
+        solver.eigenvalues().minCoeff() < -1e-12 || !std::isfinite(error.angle()))
+    {
+        cout << "Merge IMU shadow: decision=disabled current_kf=" << current->mnId
+             << " matched_map=" << matchedId << " reason=invalid_covariance_or_rotation" << endl;
+        return;
+    }
+    const double degreesPerRadian = 180.0 / std::acos(-1.0);
+    const double sigma = std::sqrt(std::max(0.0, solver.eigenvalues().maxCoeff()));
+    const double age = snapshot.estimate.time - snapshot.anchor.time;
+    const auto shadow = EvaluateMergeImuShadow(age, error.angle() * degreesPerRadian,
+                                               sigma * degreesPerRadian);
+    const char *decision = shadow.decision == MergeImuShadowResult::Accept ? "accept" :
+                           shadow.decision == MergeImuShadowResult::Defer ? "defer" : "disabled";
+    cout << "Merge IMU shadow: decision=" << decision << " reason=" << shadow.reason
+         << " current_map=" << current->GetMap()->GetId()
+         << " matched_map=" << matchedId << " current_kf=" << current->mnId
+         << " reference_kf=" << snapshot.anchor.referenceId
+         << " anchor_time=" << snapshot.anchor.time << " time=" << snapshot.estimate.time
+         << " age_s=" << age << " threshold_deg=" << shadow.thresholdDegrees
+         << " predicted_q_wxyz=[" << predicted.w() << "," << predicted.x() << "," << predicted.y() << "," << predicted.z() << "]"
+         << " visual_q_wxyz=[" << visual.w() << "," << visual.x() << "," << visual.y() << "," << visual.z() << "]"
+         << " predicted_rpy_deg=[" << predictedEuler.x() << "," << predictedEuler.y() << "," << predictedEuler.z() << "]"
+         << " visual_rpy_deg=[" << visualEuler.x() << "," << visualEuler.y() << "," << visualEuler.z() << "]"
+         << " yaw_difference_deg=" << WrappedAngleDegrees(visualEuler.z() - predictedEuler.z())
+         << " error_rad=" << error.angle()
+         << " error_vector_rad=[" << error.axis().x() * error.angle() << "," << error.axis().y() * error.angle()
+         << "," << error.axis().z() * error.angle() << "]"
+         << " model_sigma_max_rad=" << sigma
+         << " model_sigma_bias_rad_s=[" << std::sqrt(std::max(0.0, biasCovariance(0, 0))) << ","
+         << std::sqrt(std::max(0.0, biasCovariance(1, 1))) << ","
+         << std::sqrt(std::max(0.0, biasCovariance(2, 2))) << "]"
+         << " initial_covariance=zero_uncalibrated" << endl;
+}
+
+void Tracking::FinishMergeImuComparison(unsigned long currentMapId, unsigned long matchedMapId)
+{
+    if (mpMergeImuHistory && (mpMergeImuHistory->ActiveFor(matchedMapId) ||
+                              mpMergeImuHistory->ActiveFor(currentMapId)))
+        mpMergeImuHistory->Clear("anchor_map_merged");
+}
+
 void Tracking::GrabImuData(const IMU::Point &imuMeasurement)
 {
     unique_lock<mutex> lock(mMutexImuQueue);
@@ -1626,7 +1732,7 @@ void Tracking::GrabImuData(const IMU::Point &imuMeasurement)
 void Tracking::PreintegrateIMU()
 {
 
-    if(!mCurrentFrame.mpPrevFrame)
+    if(!mCurrentFrame.mpPrevFrame || mState == NO_IMAGES_YET)
     {
         Verbose::PrintMess("non prev frame ", Verbose::VERBOSITY_NORMAL);
         mCurrentFrame.setIntegrated();
@@ -1861,6 +1967,7 @@ void Tracking::Track()
     if ((mSensor == System::IMU_MONOCULAR || mSensor == System::IMU_STEREO || mSensor == System::IMU_RGBD) && mpLastKeyFrame)
         mCurrentFrame.SetNewBias(mpLastKeyFrame->GetImuBias());
 
+    const bool firstFrameAfterReset = mSensor == System::IMU_STEREO && mState == NO_IMAGES_YET;
     if(mState==NO_IMAGES_YET)
     {
         if(mbOnlyTracking || (mpAtlas->GetCurrentMap() && mpAtlas->GetCurrentMap()->KeyFramesInMap() > 0))
@@ -1871,7 +1978,7 @@ void Tracking::Track()
 
     mLastProcessedState=mState;
 
-    if ((mSensor == System::IMU_MONOCULAR || mSensor == System::IMU_STEREO || mSensor == System::IMU_RGBD) && !mbCreatedMap)
+    if ((mSensor == System::IMU_MONOCULAR || mSensor == System::IMU_STEREO || mSensor == System::IMU_RGBD) && !mbCreatedMap && !firstFrameAfterReset)
     {
 #ifdef REGISTER_TIMES
         std::chrono::steady_clock::time_point time_StartPreIMU = std::chrono::steady_clock::now();
@@ -1917,6 +2024,13 @@ void Tracking::Track()
 
         if(mState!=OK) // If rightly initialized, mState=OK
         {
+            if (mSensor == System::IMU_STEREO && mpImuRotationHistory &&
+                !mpLastKeyFrame && mpImuPreintegratedFromLastKF)
+            {
+                const IMU::Bias bias = mpImuRotationHistory->HasAnchor()
+                    ? mOrientationAnchorBias : IMU::Bias();
+                mpImuPreintegratedFromLastKF->Initialize(bias);
+            }
             mLastFrame = Frame(mCurrentFrame);
             return;
         }
@@ -2163,6 +2277,74 @@ void Tracking::Track()
                 bOK = TrackLocalMap();
         }
 
+        if (mSensor == System::IMU_STEREO && mpImuRotationHistory &&
+            mpImuRotationHistory->HasAnchor() && mCurrentFrame.isSet())
+        {
+            try
+            {
+                const auto prediction = mpImuRotationHistory->RecoveryAt(mCurrentFrame.mTimeStamp);
+                const Eigen::Quaterniond current(mCurrentFrame.GetImuRotation().cast<double>());
+                const Eigen::Vector3d imuEuler = OrientationEulerDegrees(prediction.orientation.toRotationMatrix());
+                const Eigen::Vector3d currentEuler = OrientationEulerDegrees(current.toRotationMatrix());
+                const double differenceDegrees = current.angularDistance(prediction.orientation) * (180.0 / std::acos(-1.0));
+                const bool significant = differenceDegrees >= 3.0;
+                mbImuFrameUnavailableLogged = false;
+                if (significant && !mbImuFrameDisagreementLogged)
+                {
+                    cout << "IMU frame diagnostic: time=" << mCurrentFrame.mTimeStamp
+                         << " map=" << pCurrentMap->GetId()
+                         << " anchor_time=" << prediction.anchorTime
+                         << " anchor_map=";
+                    if (mbMergeImuAnchorValid)
+                        cout << mMergeImuAnchor.mapId;
+                    else
+                        cout << "unknown";
+                    cout << " tracking_ok=" << bOK
+                         << " state_before=" << mLastProcessedState
+                         << " current_body_rpy_deg=[" << currentEuler.x() << "," << currentEuler.y() << "," << currentEuler.z() << "]"
+                         << " predicted_body_rpy_deg=[" << imuEuler.x() << "," << imuEuler.y() << "," << imuEuler.z() << "]"
+                         << " yaw_difference_deg=" << WrappedAngleDegrees(currentEuler.z() - imuEuler.z())
+                         << " rotation_difference_deg=" << differenceDegrees;
+                    MergeImuHistory::Snapshot mergePrediction{};
+                    if (mpMergeImuHistory && mpMergeImuHistory->At(mCurrentFrame.mTimeStamp, mergePrediction))
+                    {
+                        const Eigen::Vector3d delta = OrientationEulerDegrees(mergePrediction.estimate.delta.toRotationMatrix());
+                        cout << " merge_anchor_map=" << mergePrediction.anchor.mapId
+                             << " merge_anchor_time=" << mergePrediction.anchor.time
+                             << " merge_delta_rpy_deg=[" << delta.x() << "," << delta.y() << "," << delta.z() << "]";
+                    }
+                    else
+                        cout << " merge_accumulator=unavailable";
+                    cout << endl;
+                }
+                mbImuFrameDisagreementLogged = significant;
+            }
+            catch (const std::runtime_error &error)
+            {
+                if (!mbImuFrameUnavailableLogged)
+                    cout << "IMU frame diagnostic: available=no time=" << mCurrentFrame.mTimeStamp
+                         << " reason=" << error.what() << endl;
+                mbImuFrameUnavailableLogged = true;
+                mbImuFrameDisagreementLogged = false;
+            }
+        }
+
+        if (!bOK && mLastProcessedState == OK && mpMergeImuHistory && mbMergeImuAnchorValid)
+        {
+            if (mpMergeImuHistory->Begin(mMergeImuAnchor))
+                cout << "Merge IMU anchor: map=" << mMergeImuAnchor.mapId
+                     << " reference_kf=" << mMergeImuAnchor.referenceId
+                     << " time=" << mMergeImuAnchor.time << " initial_covariance=zero_uncalibrated" << endl;
+            else
+                cout << "Merge IMU anchor: unchanged_or_unavailable reason="
+                     << mpMergeImuHistory->Status() << endl;
+        }
+        else if (!bOK && mLastProcessedState == OK && mpMergeImuHistory)
+            cout << "Merge IMU anchor: unavailable reason=no_trusted_anchor" << endl;
+        if (bOK && mLastProcessedState != OK && mpMergeImuHistory &&
+            mpMergeImuHistory->ActiveFor(pCurrentMap->GetId()))
+            mpMergeImuHistory->Clear("tracking_recovered_on_anchor_map");
+
         if(bOK)
             mState = OK;
         else if (mState == OK)
@@ -2315,6 +2497,29 @@ void Tracking::Track()
         if(!mCurrentFrame.mpReferenceKF)
             mCurrentFrame.mpReferenceKF = mpReferenceKF;
 
+        if (mSensor == System::IMU_STEREO && mpImuRotationHistory &&
+            mState == OK && pCurrentMap->isImuInitialized() && mCurrentFrame.isSet())
+        {
+            const IMU::Bias bias = mCurrentFrame.mImuBias;
+            mpImuRotationHistory->SetAnchor(
+                mCurrentFrame.mTimeStamp, mCurrentFrame.GetImuRotation().cast<double>(),
+                Eigen::Vector3d(bias.bwx, bias.bwy, bias.bwz));
+            mOrientationAnchorBias = bias;
+            KeyFrame *reference = mCurrentFrame.mpReferenceKF;
+            mbMergeImuAnchorValid = reference && !reference->isBad() &&
+                                    reference->GetMap() == pCurrentMap;
+            if (mbMergeImuAnchorValid)
+            {
+                mMergeImuAnchor.mapId = pCurrentMap->GetId();
+                mMergeImuAnchor.referenceId = reference->mnId;
+                mMergeImuAnchor.time = mCurrentFrame.mTimeStamp;
+                mMergeImuAnchor.referenceToBody =
+                    Eigen::Quaterniond(reference->GetImuRotation().cast<double>()).conjugate() *
+                    Eigen::Quaterniond(mCurrentFrame.GetImuRotation().cast<double>());
+                mMergeImuAnchor.referenceToBody.normalize();
+                mMergeImuAnchor.bias = Eigen::Vector3d(bias.bwx, bias.bwy, bias.bwz);
+            }
+        }
         mLastFrame = Frame(mCurrentFrame);
     }
 
@@ -2471,6 +2676,21 @@ void Tracking::StereoInitialization()
 {
     if(mCurrentFrame.N>500)
     {
+        std::vector<int> usableStereoPoints;
+        if (mSensor == System::IMU_STEREO)
+        {
+            usableStereoPoints = UsableStereoInitializationPoints(
+                mCurrentFrame.mvDepth, mCurrentFrame.mvLeftToRightMatch,
+                mCurrentFrame.mvStereo3Dpoints, mCurrentFrame.Nleft,
+                mCurrentFrame.Nright, mpCamera2 != nullptr);
+            if (usableStereoPoints.size() < kMinStereoInitializationPoints)
+            {
+                if (mCurrentFrame.mnId % 30 == 0)
+                    cout << "Stereo initialization delayed: " << usableStereoPoints.size()
+                         << " usable stereo points (need " << kMinStereoInitializationPoints << ")" << endl;
+                return;
+            }
+        }
         if (mSensor == System::IMU_STEREO || mSensor == System::IMU_RGBD)
         {
             if (!mCurrentFrame.mpImuPreintegrated || !mLastFrame.mpImuPreintegrated)
@@ -2479,7 +2699,8 @@ void Tracking::StereoInitialization()
                 return;
             }
 
-            if (!mFastInit && (mCurrentFrame.mpImuPreintegratedFrame->avgA-mLastFrame.mpImuPreintegratedFrame->avgA).norm()<0.5)
+            if (mSensor != System::IMU_STEREO && !mFastInit &&
+                (mCurrentFrame.mpImuPreintegratedFrame->avgA-mLastFrame.mpImuPreintegratedFrame->avgA).norm()<0.5)
             {
                 cout << "not enough acceleration" << endl;
                 return;
@@ -2488,8 +2709,12 @@ void Tracking::StereoInitialization()
             if(mpImuPreintegratedFromLastKF)
                 delete mpImuPreintegratedFromLastKF;
 
-            mpImuPreintegratedFromLastKF = new IMU::Preintegrated(IMU::Bias(),*mpImuCalib);
+            const bool inherited = mSensor == System::IMU_STEREO && mpImuRotationHistory &&
+                                   mpImuRotationHistory->HasAnchor();
+            const IMU::Bias initialBias = inherited ? mOrientationAnchorBias : IMU::Bias();
+            mpImuPreintegratedFromLastKF = new IMU::Preintegrated(initialBias,*mpImuCalib);
             mCurrentFrame.mpImuPreintegrated = mpImuPreintegratedFromLastKF;
+            mCurrentFrame.SetNewBias(initialBias);
         }
 
         // Set Frame pose to the origin (In case of inertial SLAM to imu)
@@ -2497,6 +2722,32 @@ void Tracking::StereoInitialization()
         {
             Eigen::Matrix3f Rwb0 = mCurrentFrame.mImuCalib.mTcb.rotationMatrix();
             Eigen::Vector3f twb0 = mCurrentFrame.mImuCalib.mTcb.translation();
+            if (mSensor == System::IMU_STEREO && mpImuRotationHistory &&
+                mpImuRotationHistory->HasAnchor())
+            {
+                const ImuRotationHistory::Recovery recovery =
+                    mpImuRotationHistory->RecoveryAt(mCurrentFrame.mTimeStamp);
+                Rwb0 = recovery.orientation.toRotationMatrix().cast<float>();
+                twb0 = -Rwb0 * mCurrentFrame.mImuCalib.mTbc.translation();
+                mpAtlas->GetCurrentMap()->SetInheritedImuOrientation(true);
+                cout << "IMU orientation recovered from gyro history at "
+                     << mCurrentFrame.mTimeStamp
+                     << " anchor_time=" << recovery.anchorTime
+                     << " age_s=" << (mCurrentFrame.mTimeStamp - recovery.anchorTime)
+                     << " folded_until=" << recovery.foldedTime
+                     << " folded_duration_s=" << (recovery.foldedTime - recovery.anchorTime)
+                     << " folded_segments=" << recovery.foldedSegments
+                     << " folded_delta_used=" << (recovery.foldedSegments > 0 ? "yes" : "no")
+                     << " retained_segments=" << recovery.retainedSegments
+                     << " anchor_q_wxyz=[" << recovery.anchor.w() << "," << recovery.anchor.x()
+                     << "," << recovery.anchor.y() << "," << recovery.anchor.z() << "]"
+                     << " folded_delta_q_wxyz=[" << recovery.foldedDelta.w() << "," << recovery.foldedDelta.x()
+                     << "," << recovery.foldedDelta.y() << "," << recovery.foldedDelta.z() << "]"
+                     << " total_delta_q_wxyz=[" << recovery.totalDelta.w() << "," << recovery.totalDelta.x()
+                     << "," << recovery.totalDelta.y() << "," << recovery.totalDelta.z() << "]"
+                     << " orientation_Rwb_q_wxyz=[" << recovery.orientation.w() << "," << recovery.orientation.x()
+                     << "," << recovery.orientation.y() << "," << recovery.orientation.z() << "]" << endl;
+            }
             Eigen::Vector3f Vwb0;
             Vwb0.setZero();
             mCurrentFrame.SetImuPoseVelocity(Rwb0, twb0, Vwb0);
@@ -2506,6 +2757,8 @@ void Tracking::StereoInitialization()
 
         // Create KeyFrame
         KeyFrame* pKFini = new KeyFrame(mCurrentFrame,mpAtlas->GetCurrentMap(),mpKeyFrameDB);
+        if (mpMergeImuHistory)
+            mpMergeImuHistory->Capture(pKFini->mnId, pKFini->mTimeStamp);
 
         // Insert KeyFrame in the map
         mpAtlas->AddKeyFrame(pKFini);
@@ -2515,7 +2768,8 @@ void Tracking::StereoInitialization()
             for(int i=0; i<mCurrentFrame.N;i++)
             {
                 float z = mCurrentFrame.mvDepth[i];
-                if(z>0)
+                if(z>0 && (mSensor != System::IMU_STEREO ||
+                           std::binary_search(usableStereoPoints.begin(), usableStereoPoints.end(), i)))
                 {
                     Eigen::Vector3f x3D;
                     mCurrentFrame.UnprojectStereo(i, x3D);
@@ -2532,8 +2786,10 @@ void Tracking::StereoInitialization()
         } else{
             for(int i = 0; i < mCurrentFrame.Nleft; i++){
                 int rightIndex = mCurrentFrame.mvLeftToRightMatch[i];
-                if(rightIndex != -1){
-                    Eigen::Vector3f x3D = mCurrentFrame.mvStereo3Dpoints[i];
+                if(rightIndex != -1 && (mSensor != System::IMU_STEREO ||
+                                       std::binary_search(usableStereoPoints.begin(), usableStereoPoints.end(), i))){
+                    Eigen::Vector3f x3D = mSensor == System::IMU_STEREO
+                        ? mCurrentFrame.UnprojectStereoFishEye(i) : mCurrentFrame.mvStereo3Dpoints[i];
 
                     MapPoint* pNewMP = new MapPoint(x3D, pKFini, mpAtlas->GetCurrentMap());
 
@@ -3369,6 +3625,8 @@ void Tracking::CreateNewKeyFrame()
     } notStopGuard{mpLocalMapper};
 
     KeyFrame* pKF = new KeyFrame(mCurrentFrame,mpAtlas->GetCurrentMap(),mpKeyFrameDB);
+    if (mpMergeImuHistory)
+        mpMergeImuHistory->Capture(pKF->mnId, pKF->mTimeStamp);
     RequestMapVisualizationUpdate();
 
     if(mpAtlas->isImuInitialized()) //  || mpLocalMapper->IsInitializing())
@@ -3948,6 +4206,9 @@ bool Tracking::Relocalization()
 
 void Tracking::Reset(bool bLocMap)
 {
+    if (mpMergeImuHistory)
+        mpMergeImuHistory->Clear("atlas_reset");
+    mbMergeImuAnchorValid = false;
     Verbose::PrintMess("System Reseting", Verbose::VERBOSITY_NORMAL);
 
     if(mpViewer)
@@ -3997,6 +4258,12 @@ void Tracking::Reset(bool bLocMap)
     mCurrentFrame = Frame();
     mnLastRelocFrameId = 0;
     mLastFrame = Frame();
+    if (mSensor == System::IMU_STEREO && mpImuRotationHistory)
+    {
+        delete mpImuPreintegratedFromLastKF;
+        const IMU::Bias bias = mpImuRotationHistory->HasAnchor() ? mOrientationAnchorBias : IMU::Bias();
+        mpImuPreintegratedFromLastKF = new IMU::Preintegrated(bias, *mpImuCalib);
+    }
     mpReferenceKF = static_cast<KeyFrame*>(NULL);
     mpLastKeyFrame = static_cast<KeyFrame*>(NULL);
     mvIniMatches.clear();
@@ -4018,6 +4285,9 @@ void Tracking::ResetActiveMap(bool bLocMap)
     }
 
     Map* pMap = mpAtlas->GetCurrentMap();
+    if (mpMergeImuHistory && mpMergeImuHistory->ActiveFor(pMap->GetId()))
+        mpMergeImuHistory->Clear("anchor_map_reset");
+    mbMergeImuAnchorValid = false;
 
     if (!bLocMap)
     {
@@ -4086,6 +4356,12 @@ void Tracking::ResetActiveMap(bool bLocMap)
 
     mCurrentFrame = Frame();
     mLastFrame = Frame();
+    if (mSensor == System::IMU_STEREO && mpImuRotationHistory)
+    {
+        delete mpImuPreintegratedFromLastKF;
+        const IMU::Bias bias = mpImuRotationHistory->HasAnchor() ? mOrientationAnchorBias : IMU::Bias();
+        mpImuPreintegratedFromLastKF = new IMU::Preintegrated(bias, *mpImuCalib);
+    }
     mpReferenceKF = static_cast<KeyFrame*>(NULL);
     mpLastKeyFrame = static_cast<KeyFrame*>(NULL);
     mvIniMatches.clear();

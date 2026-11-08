@@ -438,8 +438,9 @@ void Optimizer::FullInertialBA(Map *pMap, int its, const bool bFixLocal, const l
             bFixed = (pKFi->mnBALocalForKF>=(maxKFid-1)) || (pKFi->mnBAFixedForKF>=(maxKFid-1));
             if(!bFixed)
                 nNonFixed++;
-            VP->setFixed(bFixed);
         }
+        VP->setFixed(bFixed || (pMap->HasInheritedImuOrientation() &&
+                                pKFi->mnId == pMap->GetInitKFid()));
         optimizer.addVertex(VP);
 
         if(pKFi->bImu)
@@ -3136,7 +3137,7 @@ Eigen::MatrixXd Optimizer::Marginalize(const Eigen::MatrixXd &H, const int &star
     return res;
 }
 
-void Optimizer::InertialOptimization(Map *pMap, Eigen::Matrix3d &Rwg, double &scale, Eigen::Vector3d &bg, Eigen::Vector3d &ba, bool bMono, Eigen::MatrixXd  &covInertial, bool bFixedVel, bool bGauss, float priorG, float priorA)
+void Optimizer::InertialOptimization(Map *pMap, Eigen::Matrix3d &Rwg, double &scale, Eigen::Vector3d &bg, Eigen::Vector3d &ba, bool bMono, Eigen::MatrixXd  &covInertial, bool bFixedVel, bool bGauss, float priorG, float priorA, bool bFixedGravity)
 {
     Verbose::PrintMess("inertial optimization", Verbose::VERBOSITY_NORMAL);
     int its = 200;
@@ -3213,7 +3214,7 @@ void Optimizer::InertialOptimization(Map *pMap, Eigen::Matrix3d &Rwg, double &sc
     // Gravity and scale
     VertexGDir* VGDir = new VertexGDir(Rwg);
     VGDir->setId(maxKFid*2+4);
-    VGDir->setFixed(false);
+    VGDir->setFixed(bFixedGravity);
     optimizer.addVertex(VGDir);
     VertexScale* VS = new VertexScale(scale);
     VS->setId(maxKFid*2+5);

@@ -19,6 +19,7 @@
 
 #include "LoopClosing.h"
 #include "LoopRevisitPolicy.h"
+#include "PlaceRecognitionPolicy.h"
 
 #include "Sim3Solver.h"
 #include "Converter.h"
@@ -241,6 +242,10 @@ void LoopClosing::Run()
                     if ((mpTracker->mSensor==System::IMU_MONOCULAR || mpTracker->mSensor==System::IMU_STEREO || mpTracker->mSensor==System::IMU_RGBD) &&
                         (!mpCurrentKF->GetMap()->isImuInitialized()))
                     {
+                        if (mpTracker->mSensor == System::IMU_STEREO)
+                            cout << "Merge IMU shadow: decision=disabled current_kf=" << mpCurrentKF->mnId
+                                 << " matched_map=" << mpMergeMatchedKF->GetMap()->GetId()
+                                 << " reason=current_map_imu_uninitialized" << endl;
                         cout << "IMU is not initilized, merge is aborted" << endl;
                     }
                     else
@@ -253,7 +258,12 @@ void LoopClosing::Run()
                         g2o::Sim3 gSw1m = mg2oMergeSlw;
 
                         mSold_new = (gSw2c * gScw1);
+                        const unsigned long mergeCurrentMapId = mpCurrentKF->GetMap()->GetId();
+                        const unsigned long mergeMatchedMapId = mpMergeMatchedKF->GetMap()->GetId();
 
+                        if (mpTracker->mSensor == System::IMU_STEREO)
+                            mpTracker->LogMergeImuComparison(mpCurrentKF, mpMergeMatchedKF,
+                                                             mSold_new.rotation());
 
                         if(mpCurrentKF->GetMap()->IsInertial() && mpMergeMatchedKF->GetMap()->IsInertial())
                         {
@@ -279,6 +289,15 @@ void LoopClosing::Run()
                                 mSold_new = g2o::Sim3(ExpSO3(phi),mSold_new.translation(),1.0);
                             }
                         }
+
+                        const Eigen::Quaterniond mergeRotation(mSold_new.rotation());
+                        cout << "Merge alignment: current_map=" << mpCurrentKF->GetMap()->GetId()
+                             << " matched_map=" << mpMergeMatchedKF->GetMap()->GetId()
+                             << " current_BA2=" << mpCurrentKF->GetMap()->GetIniertialBA2()
+                             << " matched_BA2=" << mpMergeMatchedKF->GetMap()->GetIniertialBA2()
+                             << " scale=" << mSold_new.scale()
+                             << " rotation_q_wxyz=[" << mergeRotation.w() << "," << mergeRotation.x()
+                             << "," << mergeRotation.y() << "," << mergeRotation.z() << "]" << endl;
 
                         mg2oMergeSmw = gSmw2 * gSw2c * gScw1;
 
@@ -307,6 +326,8 @@ void LoopClosing::Run()
 #endif
 
                         Verbose::PrintMess("Merge finished!", Verbose::VERBOSITY_QUIET);
+                        if (mpTracker->mSensor == System::IMU_STEREO)
+                            mpTracker->FinishMergeImuComparison(mergeCurrentMapId, mergeMatchedMapId);
                     }
 
                     vdPR_CurrentTime.push_back(mpCurrentKF->mTimeStamp);
@@ -455,7 +476,10 @@ bool LoopClosing::NewDetectCommonRegions()
         mpLastMap = mpCurrentKF->GetMap();
     }
 
-    if(mpLastMap->IsInertial() && !mpLastMap->GetIniertialBA2())
+    if(!PlaceRecognitionReady(mpLastMap->IsInertial(),
+                              mpTracker->mSensor == System::IMU_STEREO,
+                              mpLastMap->isImuInitialized(),
+                              mpLastMap->GetIniertialBA2()))
     {
         mpKeyFrameDB->add(mpCurrentKF);
         mpCurrentKF->SetErase();
@@ -1957,6 +1981,7 @@ void LoopClosing::MergeLocal2()
 
     if((mpTracker->mSensor==System::IMU_MONOCULAR || mpTracker->mSensor==System::IMU_STEREO || mpTracker->mSensor==System::IMU_RGBD)
        && !pCurrentMap->GetIniertialBA2()){
+        cout << "Early inertial merge: optimizing IMU biases and marking BA1/BA2 complete" << endl;
         // Map is not completly initialized
         Eigen::Vector3d bg, ba;
         bg << 0., 0., 0.;

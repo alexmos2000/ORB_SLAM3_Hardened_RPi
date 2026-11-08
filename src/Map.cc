@@ -316,10 +316,23 @@ void Map::clear()
     mErasedKeyframeOrder.clear();
     mnMaxKFid = mnInitKFid;
     mbImuInitialized = false;
+    mbInheritedImuOrientation = false;
     mvpReferenceMapPoints.clear();
     mvpKeyFrameOrigins.clear();
     mbIMU_BA1 = false;
     mbIMU_BA2 = false;
+}
+
+void Map::SetInheritedImuOrientation(bool inherited)
+{
+    unique_lock<mutex> lock(mMutexMap);
+    mbInheritedImuOrientation = inherited;
+}
+
+bool Map::HasInheritedImuOrientation()
+{
+    unique_lock<mutex> lock(mMutexMap);
+    return mbInheritedImuOrientation;
 }
 
 bool Map::IsInUse()

@@ -103,3 +103,5 @@ semantic-review/
 .kiro/
 test_build/
 .superpowers/
+.cross/
+Examples/Calibration/recordings/

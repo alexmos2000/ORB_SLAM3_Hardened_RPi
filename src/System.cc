@@ -491,6 +491,18 @@ void System::Cleanup(bool destroyResources) noexcept
     settings_ = nullptr;
 }
 
+void System::EnableImuRotationHistory(double frequency)
+{
+    if (mSensor != IMU_STEREO)
+        throw std::runtime_error("IMU rotation history requires stereo-inertial mode");
+    mpTracker->EnableImuRotationHistory(frequency);
+}
+
+void System::RecordImuRotationSample(const IMU::Point &measurement)
+{
+    mpTracker->RecordImuRotationSample(measurement);
+}
+
 Sophus::SE3f System::TrackStereo(const cv::Mat &imLeft, const cv::Mat &imRight, const double &timestamp, const vector<IMU::Point>& vImuMeas, string filename)
 {
     if(mSensor!=STEREO && mSensor!=IMU_STEREO)
@@ -594,6 +606,28 @@ Sophus::SE3f System::TrackStereo(const cv::Mat &imLeft, const cv::Mat &imRight, 
     mTrackingState = mpTracker->mState;
     mTrackedMapPoints = mpTracker->mCurrentFrame.mvpMapPoints;
     mTrackedKeyPointsUn = mpTracker->mCurrentFrame.mvKeysUn;
+    mTrackedStereoLeftImage = imLeftToFeed;
+    mTrackedStereoRightImage = imRightToFeed;
+    mTrackedMapPointLeftPixels.clear();
+    mTrackedMapPointRightPixels.clear();
+    const Frame& trackedFrame = mpTracker->mCurrentFrame;
+    const size_t featureCount = std::min({trackedFrame.mvpMapPoints.size(),
+                                          trackedFrame.mvKeys.size(),
+                                          trackedFrame.mvbOutlier.size()});
+    for (size_t i = 0; i < featureCount; ++i)
+    {
+        if (!trackedFrame.mvpMapPoints[i] || trackedFrame.mvbOutlier[i])
+            continue;
+        mTrackedMapPointLeftPixels.push_back(trackedFrame.mvKeys[i].pt);
+        if (trackedFrame.Nleft >= 0 && i < trackedFrame.mvLeftToRightMatch.size())
+        {
+            const int right = trackedFrame.mvLeftToRightMatch[i];
+            if (right >= 0 && static_cast<size_t>(right) < trackedFrame.mvKeysRight.size())
+                mTrackedMapPointRightPixels.push_back(trackedFrame.mvKeysRight[right].pt);
+        }
+        else if (i < trackedFrame.mvuRight.size() && trackedFrame.mvuRight[i] >= 0.0f)
+            mTrackedMapPointRightPixels.emplace_back(trackedFrame.mvuRight[i], trackedFrame.mvKeys[i].pt.y);
+    }
     frame_snapshot.tracking_state = mTrackingState;
     mLastFrameSnapshot = frame_snapshot;
 
@@ -902,6 +936,11 @@ void System::SaveTrajectoryTUM(const string &filename)
     }
 
     vector<KeyFrame*> vpKFs = mpAtlas->GetAllKeyFrames();
+    if(vpKFs.empty())
+    {
+        cerr << "Cannot save camera trajectory: no keyframes were created." << endl;
+        return;
+    }
     sort(vpKFs.begin(),vpKFs.end(),KeyFrame::lId);
 
     // Transform all keyframes so that the first keyframe is at the origin.
@@ -1671,6 +1710,34 @@ vector<cv::KeyPoint> System::GetTrackedKeyPointsUn()
 {
     unique_lock<mutex> lock(mMutexState);
     return mTrackedKeyPointsUn;
+}
+
+pair<cv::Mat, cv::Mat> System::GetTrackedStereoImagesWithMapPoints()
+{
+    cv::Mat left, right;
+    vector<cv::Point2f> leftPoints, rightPoints;
+    {
+        unique_lock<mutex> lock(mMutexState);
+        left = mTrackedStereoLeftImage.clone();
+        right = mTrackedStereoRightImage.clone();
+        leftPoints = mTrackedMapPointLeftPixels;
+        rightPoints = mTrackedMapPointRightPixels;
+    }
+    const auto draw = [](cv::Mat &image, const vector<cv::Point2f> &points)
+    {
+        for (const cv::Point2f &point : points)
+        {
+            if (!std::isfinite(point.x) || !std::isfinite(point.y) ||
+                point.x < 0 || point.y < 0 || point.x >= image.cols || point.y >= image.rows)
+                continue;
+            const cv::Point center(cvRound(point.x), cvRound(point.y));
+            cv::circle(image, center, 5, cv::Scalar(0), 3, cv::LINE_AA);
+            cv::circle(image, center, 4, cv::Scalar(255), 2, cv::LINE_AA);
+        }
+    };
+    draw(left, leftPoints);
+    draw(right, rightPoints);
+    return {std::move(left), std::move(right)};
 }
 
 double System::GetTimeFromIMUInit()

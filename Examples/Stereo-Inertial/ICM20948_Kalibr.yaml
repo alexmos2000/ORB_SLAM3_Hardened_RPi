@@ -1,0 +1,88 @@
+%YAML:1.0
+
+File.version: "1.0"
+
+Camera.type: "PinHole"
+
+# Kalibr cam0 (left), 640x480
+Camera1.fx: 1098.607555
+Camera1.fy: 1098.127955
+Camera1.cx: 291.188847
+Camera1.cy: 274.559162
+Camera1.k1: -0.108745192
+Camera1.k2: 0.417900885
+Camera1.p1: -0.001553072
+Camera1.p2: 0.000902109
+
+# Kalibr cam1 (right), 640x480
+Camera2.fx: 1096.911410
+Camera2.fy: 1096.529789
+Camera2.cx: 335.440106
+Camera2.cy: 264.768002
+Camera2.k1: -0.111452943
+Camera2.k2: 0.431577889
+Camera2.p1: -0.000451599
+Camera2.p2: -0.000572133
+
+Camera.width: 640
+Camera.height: 480
+# RPi live capture: processing FPS must not exceed capture FPS.
+Camera.captureFps: 30
+Camera.fps: 15
+# Maximum automatic shutter in microseconds; must be shorter than the capture period.
+Camera.exposureTimeUs: 15000
+Camera.RGB: 0
+
+Stereo.ThDepth: 40.0
+
+# Inverse of Kalibr cam1.T_cn_cnm1: cam1 <- cam0.
+# ORB-SLAM expects cam0 <- cam1 for Stereo.T_c1_c2.
+Stereo.T_c1_c2: !!opencv-matrix
+  rows: 4
+  cols: 4
+  dt: f
+  data: [0.999938904, 0.001200562, 0.010988505, 0.060060079,
+         -0.001278478, 0.999974074, 0.007086451, -0.000279777,
+         -0.010979712, -0.007100067, 0.999914514, -0.000715022,
+         0.0, 0.0, 0.0, 1.0]
+
+# Inverse of Kalibr cam0.T_cam_imu, mapping camera coordinates to IMU.
+IMU.T_b_c1: !!opencv-matrix
+  rows: 4
+  cols: 4
+  dt: f
+  data: [0.999992374, 0.003759238, 0.001058688, -0.027538328,
+         -0.003760897, 0.999991696, 0.001569873, -0.001245817,
+         -0.001052778, -0.001573842, 0.999998207, 0.010350676,
+         0.0, 0.0, 0.0, 1.0]
+
+# Kalibr result-imu.yaml
+IMU.NoiseGyro: 0.00016968
+IMU.NoiseAcc: 0.002
+IMU.GyroWalk: 0.000019393
+IMU.AccWalk: 0.003
+IMU.Frequency: 200.0
+IMU.InsertKFsWhenLost: 0
+
+# Kalibr time_offset values are cam0: 0.000556510 s and cam1: 0.001709352 s.
+# The current live capture code does not apply per-camera/IMU time offsets.
+
+ORBextractor.nFeatures: 1200
+ORBextractor.scaleFactor: 1.2
+ORBextractor.nLevels: 8
+ORBextractor.iniThFAST: 20
+ORBextractor.minThFAST: 7
+
+Viewer.KeyFrameSize: 0.05
+Viewer.KeyFrameLineWidth: 1.0
+Viewer.GraphLineWidth: 0.9
+Viewer.PointSize: 2.0
+Viewer.CameraSize: 0.08
+Viewer.CameraLineWidth: 3.0
+Viewer.ViewpointX: 0.0
+Viewer.ViewpointY: -0.7
+Viewer.ViewpointZ: -1.8
+Viewer.ViewpointF: 500.0
+Viewer.imageViewScale: 1.0
+
+# Set atlas paths explicitly when map persistence is required.

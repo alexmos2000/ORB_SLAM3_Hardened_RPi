@@ -1,10 +1,23 @@
 find_package(GTest REQUIRED)
+include(CheckIncludeFileCXX)
+check_include_file_cxx(boost/json.hpp HAVE_BOOST_JSON)
 
 set(TEST_SOURCES
     test_crash_monitor.cc
     test_web_viewer_mirror.cc
     test_atlas_lifecycle.cc
+    test_imu_rotation_history.cc
+    test_stereo_initialization_points.cc
+    test_place_recognition_policy.cc
+    test_gyro_relative_accumulator.cc
+    test_merge_imu_history.cc
+    test_orientation_euler.cc
+    test_merge_imu_shadow_policy.cc
 )
+
+if(HAVE_BOOST_JSON)
+    list(APPEND TEST_SOURCES test_auto_exposure_tuning.cc)
+endif()
 
 add_executable(orb_slam3_tests ${TEST_SOURCES})
 

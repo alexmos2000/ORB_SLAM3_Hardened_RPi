@@ -149,6 +149,8 @@ public:
 
     FrameSnapshot GetLastFrameSnapshot() const;
     GraphSnapshot GetGraphSnapshot();
+    void EnableImuRotationHistory(double frequency);
+    void RecordImuRotationSample(const IMU::Point &measurement);
 
     // Reset the system (clear Atlas or the active map)
     void Reset();
@@ -198,6 +200,7 @@ public:
     int GetTrackingState();
     std::vector<MapPoint*> GetTrackedMapPoints();
     std::vector<cv::KeyPoint> GetTrackedKeyPointsUn();
+    std::pair<cv::Mat, cv::Mat> GetTrackedStereoImagesWithMapPoints();
 
     // For debugging
     double GetTimeFromIMUInit();
@@ -288,6 +291,8 @@ private:
     // Tracking state
     int mTrackingState;
     std::vector<MapPoint*> mTrackedMapPoints;
+    cv::Mat mTrackedStereoLeftImage, mTrackedStereoRightImage;
+    std::vector<cv::Point2f> mTrackedMapPointLeftPixels, mTrackedMapPointRightPixels;
     std::vector<cv::KeyPoint> mTrackedKeyPointsUn;
     mutable std::mutex mMutexState;
     FrameSnapshot mLastFrameSnapshot;

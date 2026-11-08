@@ -64,6 +64,10 @@ find_package(OpenSSL REQUIRED)
 find_package(Threads REQUIRED)
 
 find_package(realsense2)
+find_package(PkgConfig QUIET)
+if(PkgConfig_FOUND)
+    pkg_check_modules(LIBCAMERA QUIET IMPORTED_TARGET libcamera)
+endif()
 
 include_directories(
 ${PROJECT_SOURCE_DIR}
@@ -289,6 +293,18 @@ endif()
 #Stereo Inertial examples
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${PROJECT_SOURCE_DIR}/Examples/Stereo-Inertial)
 
+if(TARGET PkgConfig::LIBCAMERA)
+    include(CheckIncludeFileCXX)
+    check_include_file_cxx(boost/json.hpp HAVE_BOOST_JSON)
+    if(NOT HAVE_BOOST_JSON)
+        message(FATAL_ERROR "The libcamera stereo example requires Boost.JSON headers (Boost 1.75 or newer)")
+    endif()
+    add_executable(stereo_inertial_icm20948 Examples/Stereo-Inertial/stereo_inertial_icm20948.cc)
+    target_compile_features(stereo_inertial_icm20948 PRIVATE cxx_std_20)
+    target_include_directories(stereo_inertial_icm20948 PRIVATE ${OpenCV_INCLUDE_DIRS})
+    target_link_libraries(stereo_inertial_icm20948 ${PROJECT_NAME} PkgConfig::LIBCAMERA Threads::Threads)
+endif()
+
 add_executable(stereo_inertial_euroc
         Examples/Stereo-Inertial/stereo_inertial_euroc.cc)
 target_link_libraries(stereo_inertial_euroc ${PROJECT_NAME})
@@ -308,6 +324,12 @@ if(realsense2_FOUND)
 endif()
 
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${PROJECT_SOURCE_DIR}/Examples/Calibration)
+if(TARGET PkgConfig::LIBCAMERA)
+    add_executable(recorder_icm20948 Examples/Calibration/recorder_icm20948.cc)
+    target_compile_features(recorder_icm20948 PRIVATE cxx_std_20)
+    target_include_directories(recorder_icm20948 PRIVATE ${OpenCV_INCLUDE_DIRS})
+    target_link_libraries(recorder_icm20948 ${OpenCV_LIBS} PkgConfig::LIBCAMERA Threads::Threads)
+endif()
 if(realsense2_FOUND)
     add_executable(recorder_realsense_D435i
             Examples/Calibration/recorder_realsense_D435i.cc)

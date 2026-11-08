@@ -35,6 +35,7 @@
 #include "MapDrawer.h"
 #include "System.h"
 #include "ImuTypes.h"
+#include "MergeImuHistory.h"
 #include "Settings.h"
 
 #include "GeometricCamera.h"
@@ -43,6 +44,8 @@
 #include <chrono>
 #include <mutex>
 #include <unordered_set>
+#include <memory>
+#include "ImuRotationHistory.h"
 
 namespace ORB_SLAM3
 {
@@ -76,6 +79,11 @@ public:
     Sophus::SE3f GrabImageMonocular(const cv::Mat &im, const double &timestamp, string filename);
 
     void GrabImuData(const IMU::Point &imuMeasurement);
+    void EnableImuRotationHistory(double frequency);
+    void RecordImuRotationSample(const IMU::Point &imuMeasurement);
+    void LogMergeImuComparison(KeyFrame *current, KeyFrame *matched,
+                               const Eigen::Quaterniond &oldFromNew);
+    void FinishMergeImuComparison(unsigned long currentMapId, unsigned long matchedMapId);
 
     void SetLocalMapper(LocalMapping* pLocalMapper);
     void SetLoopClosing(LoopClosing* pLoopClosing);
@@ -253,6 +261,13 @@ protected:
     // Vector of IMU measurements from previous to current frame (to be filled by PreintegrateIMU)
     std::vector<IMU::Point> mvImuFromLastFrame;
     std::mutex mMutexImuQueue;
+    std::unique_ptr<ImuRotationHistory> mpImuRotationHistory;
+    std::unique_ptr<MergeImuHistory> mpMergeImuHistory;
+    MergeImuHistory::Anchor mMergeImuAnchor{};
+    bool mbMergeImuAnchorValid = false;
+    bool mbImuFrameDisagreementLogged = false;
+    bool mbImuFrameUnavailableLogged = false;
+    IMU::Bias mOrientationAnchorBias;
 
     // Imu calibration parameters
     IMU::Calib *mpImuCalib;

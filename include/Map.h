@@ -128,6 +128,8 @@ public:
 
     void SetImuInitialized();
     bool isImuInitialized();
+    void SetInheritedImuOrientation(bool inherited);
+    bool HasInheritedImuOrientation();
 
     void ApplyScaledRotation(const Sophus::SE3f &T, const float s, const bool bScaledVel=false);
 
@@ -170,6 +172,7 @@ public:
     std::set<long unsigned int> msFixedKFs;
 
 protected:
+    bool mbInheritedImuOrientation = false;
 
     long unsigned int mnId;
 
